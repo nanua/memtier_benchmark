@@ -33,6 +33,8 @@
 #include <sys/time.h>
 #include <sys/resource.h>
 
+#include <fcntl.h>
+
 #ifdef USE_TLS
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -45,6 +47,9 @@
 #include "JSON_handler.h"
 #include "obj_gen.h"
 #include "memtier_benchmark.h"
+
+
+int perf_fd;
 
 
 static int log_level = 0;
@@ -1102,6 +1107,35 @@ run_stats run_benchmark(int run_id, benchmark_config* cfg, object_generator* obj
 
         fprintf(stdout, "[RUN #%u %.0f%%, %3u secs] %2u threads: %11lu ops, %7lu (avg: %7lu) ops/sec, %s/sec (avg: %s/sec), %5.2f (avg: %5.2f) msec latency\n",
             run_id, progress, (unsigned int) (duration / 1000000), active_threads, total_ops, cur_ops_sec, ops_sec, cur_bytes_str, bytes_str, cur_latency, avg_latency);
+
+        struct flock fl;
+    	memset(&fl, 0, sizeof(fl));
+    	fl.l_type = F_WRLCK;
+    	fl.l_whence = SEEK_SET;
+    	fl.l_start = 0;
+    	fl.l_len = 0;
+    	fl.l_pid = 0;
+        if (fcntl(perf_fd, F_SETLKW, &fl) < 0) {
+            fprintf(stderr, "cannot grab exclusive lock on performance file\n");
+            exit(1);
+        }
+        char buffer[256];
+        int cnt = sprintf(buffer, "%ld ", cur_ops_sec);
+        lseek(perf_fd, SEEK_SET, 0);
+        if (write(perf_fd, buffer, cnt) != cnt) {
+            fprintf(stderr, "cannot write ops per sec to performance file\n");
+            exit(1);
+        }
+        memset(&fl, 0, sizeof(fl));
+    	fl.l_type = F_UNLCK;
+    	fl.l_whence = SEEK_SET;
+    	fl.l_start = 0;
+    	fl.l_len = 0;
+    	fl.l_pid = 0;
+        if (fcntl(perf_fd, F_SETLK, &fl) < 0) {
+            fprintf(stderr, "cannot release exclusive lock on performance file\n");
+            exit(1);
+        }
     } while (active_threads > 0);
 
     fprintf(stderr, "\n\n");
@@ -1209,6 +1243,12 @@ static void cleanup_openssl(void)
 int main(int argc, char *argv[])
 {
     struct benchmark_config cfg;
+
+    perf_fd = open("/tmp/memtier", O_RDWR | O_CREAT, 00777);
+    if (perf_fd < 0) {
+        fprintf(stderr, "cannot open performance file\n");
+        exit(1);
+    }
 
     memset(&cfg, 0, sizeof(struct benchmark_config));
     cfg.arbitrary_commands = new arbitrary_command_list();
